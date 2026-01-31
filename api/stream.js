@@ -7,47 +7,64 @@ module.exports = async (req, res) => {
   const videoUrl = raw.startsWith("http") ? raw : `https://www.youtube.com/watch?v=${raw}`;
 
   try {
-    // 1. Validasi URL
+    // Validasi dasar
     if (!ytdl.validateURL(videoUrl)) {
-      return res.status(400).send("Invalid URL");
+      return res.status(400).send("invalid youtube url");
     }
 
-    // 2. Dapatkan Info dengan User-Agent palsu agar tidak dideteksi bot
-    const info = await ytdl.getInfo(videoUrl, {
+    // --- STRATEGI BARU: Menggunakan Agent Khusus ---
+    // Kita membuat ytdl 'berpura-pura' menjadi browser Android
+    const agentOptions = {
       requestOptions: {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+          // User Agent Android agar YouTube tidak curiga
+          "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+          "Accept": "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Referer": "https://www.youtube.com/",
         }
       }
-    });
+    };
 
-    // 3. Pilih format audio terbaik
+    // 1. Ambil Info Video
+    const info = await ytdl.getInfo(videoUrl, agentOptions);
+
+    // 2. Pilih Format Audio
     const format = ytdl.chooseFormat(info.formats, {
       quality: "highestaudio",
       filter: "audioonly",
     });
 
-    if (!format) return res.status(404).send("No audio format found");
+    if (!format || !format.url) {
+      return res.status(404).send("no audio format found");
+    }
 
-    // 4. Set Header agar Browser (Chrome/Android) mau memutar (PENTING!)
+    // --- PENTING: Header untuk Browser ---
     res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Access-Control-Allow-Origin", "*"); // Izinkan semua domain akses
-    res.setHeader("Transfer-Encoding", "chunked");
+    // Mengizinkan browser memutar dari domain lain
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 
-    // 5. Streaming
+    // 3. Teknik Stream: Langsung redirect jika memungkinkan, atau Pipe
+    // Kita gunakan teknik 'downloadFromInfo' dengan opsi highWaterMark besar
+    // agar buffer lebih lancar di Vercel
     const stream = ytdl.downloadFromInfo(info, {
       format: format,
-      requestOptions: {
-          headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-          }
+      highWaterMark: 1 << 25, // Buffer besar
+      requestOptions: agentOptions.requestOptions // Gunakan header yang sama
+    });
+
+    stream.on("error", (err) => {
+      console.error("Stream Error:", err);
+      if (!res.headersSent) {
+        res.status(500).send("Streaming failed on server");
       }
     });
 
     stream.pipe(res);
 
   } catch (e) {
-    console.error("Stream Error:", e.message);
-    res.status(500).send(e.message);
+    console.error("Backend Error:", e.message);
+    res.status(500).send("Gagal memutar. YouTube memblokir IP ini.");
   }
 };
